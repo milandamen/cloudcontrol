@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>CloudControl Dashboard</title>
+    <style>
+        body {
+            background: white;
+        }
+    </style>
+</head>
+<body>
+
+<h2>Actions</h2>
+
+<form method="post" action="execute/poweroff-all-and-self?key={{.WebAdmin.UriKey}}">
+    <a href="#" onclick="this.parentNode.submit();">Poweroff all remotes and self</a>
+</form>
+
+</body>
+</html>
