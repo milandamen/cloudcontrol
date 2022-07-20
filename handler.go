@@ -6,8 +6,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"math"
 	"net/http"
 	"text/template"
+	"time"
 
 	"github.com/pkg/errors"
 )
@@ -20,6 +22,7 @@ func (p *program) newMux() http.Handler {
 	}
 
 	mux.HandleFunc("/node/execute/poweroff", p.nodeExecutePoweroffHandler)
+	mux.HandleFunc("/node/health", p.nodeHealthHandler)
 
 	return mux
 }
@@ -64,11 +67,45 @@ func (p *program) webadminHandler(rw http.ResponseWriter, r *http.Request) {
 	}
 }
 
+type webadminDashboardData struct {
+	WebAdmin struct {
+		UriKey  string
+		Remotes []webadminDashboardDataRemote
+	}
+}
+
+type webadminDashboardDataRemote struct {
+	Host         string
+	PingStatus   string
+	HealthStatus string
+}
+
 func (p *program) webadminDashboardHandler(rw http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		rw.WriteHeader(http.StatusMethodNotAllowed)
 		_, _ = rw.Write([]byte("HTTP method not allowed"))
 		return
+	}
+
+	data := webadminDashboardData{}
+	data.WebAdmin.UriKey = p.Config.WebAdmin.UriKey
+	for _, remote := range p.Config.WebAdmin.Remotes {
+		dr := webadminDashboardDataRemote{Host: remote.Host}
+		ps, err := p.PingRemote(remote)
+		if err != nil {
+			dr.PingStatus = err.Error()
+		} else {
+			dr.PingStatus = string(ps)
+		}
+
+		var nhr nodeHealthResponse
+		nhr, err = p.FetchRemoteHealth(remote)
+		if err != nil {
+			dr.HealthStatus = err.Error()
+		} else {
+			dr.HealthStatus = nhr.Status
+		}
+		data.WebAdmin.Remotes = append(data.WebAdmin.Remotes, dr)
 	}
 
 	t, err := template.New("").Parse(webadminTemplate)
@@ -80,7 +117,7 @@ func (p *program) webadminDashboardHandler(rw http.ResponseWriter, r *http.Reque
 	}
 
 	var body bytes.Buffer
-	if err = t.Execute(&body, p.Config); err != nil {
+	if err = t.Execute(&body, data); err != nil {
 		_ = p.Logger.Error(errors.Wrap(err, "cannot execute root template"))
 		rw.WriteHeader(http.StatusInternalServerError)
 		_, _ = rw.Write([]byte("Internal server error"))
@@ -119,11 +156,6 @@ func (p *program) webadminExecutePoweroffAllAndSelfHandler(rw http.ResponseWrite
 	_, _ = rw.Write([]byte("Powering off remotes and self."))
 }
 
-type nodePoweroffAction struct {
-	Async             bool `json:"Async"`
-	PoweroffDelayMsec int  `json:"PoweroffDelayMsec"`
-}
-
 func (p *program) nodeExecutePoweroffHandler(rw http.ResponseWriter, r *http.Request) {
 	defer p.recoverPanic(r.RequestURI)
 
@@ -133,11 +165,64 @@ func (p *program) nodeExecutePoweroffHandler(rw http.ResponseWriter, r *http.Req
 		return
 	}
 
+	var action nodePoweroffAction
+	if !p.verifyNodeRequest(&action, rw, r) {
+		return
+	}
+
+	if action.Async {
+		go func() {
+			if err := p.ExecutePoweroff(action.PoweroffDelayMsec); err != nil {
+				_ = p.Logger.Error(errors.Wrap(err, "cannot execute poweroff").Error())
+			}
+		}()
+
+		rw.WriteHeader(http.StatusOK)
+		_, _ = rw.Write([]byte("OK async"))
+	} else {
+		if err := p.ExecutePoweroff(action.PoweroffDelayMsec); err != nil {
+			rw.WriteHeader(http.StatusInternalServerError)
+			_, _ = rw.Write([]byte(errors.Wrap(err, "cannot execute poweroff").Error()))
+			return
+		}
+
+		rw.WriteHeader(http.StatusOK)
+		_, _ = rw.Write([]byte("OK"))
+	}
+}
+
+func (p *program) nodeHealthHandler(rw http.ResponseWriter, r *http.Request) {
+	defer p.recoverPanic(r.RequestURI)
+
+	if r.Method != http.MethodPost {
+		rw.WriteHeader(http.StatusMethodNotAllowed)
+		_, _ = rw.Write([]byte("HTTP method not allowed"))
+		return
+	}
+
+	var action nodeHealthAction
+	if !p.verifyNodeRequest(&action, rw, r) {
+		return
+	}
+
+	data, err := json.Marshal(nodeHealthResponse{Status: "online"})
+	if err != nil {
+		rw.WriteHeader(http.StatusInternalServerError)
+		_ = p.Logger.Error(errors.Wrap(err, "cannot create health response"))
+		return
+	}
+
+	rw.Header().Set("Content-Type", "application/json")
+	rw.WriteHeader(http.StatusOK)
+	_, _ = rw.Write(data)
+}
+
+func (p *program) verifyNodeRequest(action actionInterface, rw http.ResponseWriter, r *http.Request) bool {
 	signatureBytes := r.Header.Get("X-Signature")
 	if signatureBytes == "" {
 		rw.WriteHeader(http.StatusUnauthorized)
 		_, _ = rw.Write([]byte("Unauthorized"))
-		return
+		return false
 	}
 
 	dec := base64.NewDecoder(base64.StdEncoding, bytes.NewBufferString(signatureBytes))
@@ -145,7 +230,7 @@ func (p *program) nodeExecutePoweroffHandler(rw http.ResponseWriter, r *http.Req
 	if err != nil {
 		rw.WriteHeader(http.StatusUnauthorized)
 		_, _ = rw.Write([]byte("Unauthorized"))
-		return
+		return false
 	}
 
 	var reqBody bytes.Buffer
@@ -153,7 +238,7 @@ func (p *program) nodeExecutePoweroffHandler(rw http.ResponseWriter, r *http.Req
 		_ = p.Logger.Error(errors.Wrap(err, "cannot read request body"))
 		rw.WriteHeader(http.StatusBadRequest)
 		_, _ = rw.Write([]byte("Bad request"))
-		return
+		return false
 	}
 
 	message := reqBody.Bytes()
@@ -167,35 +252,30 @@ func (p *program) nodeExecutePoweroffHandler(rw http.ResponseWriter, r *http.Req
 	if !verified {
 		rw.WriteHeader(http.StatusUnauthorized)
 		_, _ = rw.Write([]byte("Unauthorized"))
-		return
+		return false
 	}
 
-	var action nodePoweroffAction
 	if err = json.Unmarshal(message, &action); err != nil {
 		rw.WriteHeader(http.StatusBadRequest)
 		_, _ = rw.Write([]byte(errors.Wrap(err, "cannot JSON decode action").Error()))
-		return
+		return false
 	}
 
-	if action.Async {
-		go func() {
-			if err = p.ExecutePoweroff(action.PoweroffDelayMsec); err != nil {
-				_ = p.Logger.Error(errors.Wrap(err, "cannot execute poweroff").Error())
-			}
-		}()
-
-		rw.WriteHeader(http.StatusOK)
-		_, _ = rw.Write([]byte("OK async"))
-	} else {
-		if err = p.ExecutePoweroff(action.PoweroffDelayMsec); err != nil {
-			rw.WriteHeader(http.StatusInternalServerError)
-			_, _ = rw.Write([]byte(errors.Wrap(err, "cannot execute poweroff").Error()))
-			return
-		}
-
-		rw.WriteHeader(http.StatusOK)
-		_, _ = rw.Write([]byte("OK"))
+	var t time.Time
+	t, err = action.ParseCurrentTime()
+	if err != nil {
+		rw.WriteHeader(http.StatusBadRequest)
+		_, _ = rw.Write([]byte(errors.Wrap(err, "cannot parse current time").Error()))
+		return false
 	}
+
+	if math.Abs(time.Now().Sub(t).Minutes()) >= 1 {
+		rw.WriteHeader(http.StatusBadRequest)
+		_, _ = rw.Write([]byte(errors.Wrap(err, "current time deviates too far").Error()))
+		return false
+	}
+
+	return true
 }
 
 func (p *program) recoverPanic(requestURI string) {

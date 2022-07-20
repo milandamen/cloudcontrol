@@ -6,10 +6,72 @@
     <style>
         body {
             background: white;
+            font-family: sans-serif;
+            margin-left: 16px;
+        }
+
+        th {
+            text-align: left;
+        }
+
+        th, td {
+            padding-right: 20px;
+        }
+
+        tr:nth-child(even) {
+            background: #EAEAF2;
+        }
+        tr:nth-child(odd) {
+            background: #FFF;
+        }
+
+        .ping-status {
+            color: red;
+        }
+
+        .health-status {
+            color: red;
+        }
+
+        [data-ping-status="online"] .ping-status {
+            color: black;
+        }
+
+        [data-ping-status="offline"] .ping-status {
+            color: darkgray;
+        }
+
+        [data-health-status="online"] .health-status {
+            color: black;
+        }
+
+        [data-ping-status="offline"][data-health-status="offline"] .health-status {
+            color: darkgray;
         }
     </style>
 </head>
 <body>
+
+<h2>Hosts</h2>
+
+<table>
+    <thead>
+        <tr>
+            <th>Host</th>
+            <th>Ping</th>
+            <th>Health</th>
+        </tr>
+    </thead>
+    <tbody>
+        {{range .WebAdmin.Remotes}}
+            <tr data-ping-status="{{.PingStatus}}" data-health-status="{{.HealthStatus}}">
+                <td>{{.Host}}</td>
+                <td class="ping-status">{{.PingStatus}}</td>
+                <td class="health-status">{{.HealthStatus}}</td>
+            </tr>
+        {{end}}
+    </tbody>
+</table>
 
 <h2>Actions</h2>
 
