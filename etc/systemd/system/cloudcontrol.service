@@ -1,0 +1,18 @@
+[Unit]
+Description=CloudControl
+ConditionFileIsExecutable=/opt/cloudcontrol/cloudcontrol
+
+Requires=network.target
+After=network-online.target syslog.target
+
+[Service]
+StartLimitInterval=5
+StartLimitBurst=10
+ExecStart=/opt/cloudcontrol/cloudcontrol
+WorkingDirectory=/opt/cloudcontrol
+Restart=always
+RestartSec=120
+EnvironmentFile=-/etc/sysconfig/cloudcontrol
+
+[Install]
+WantedBy=multi-user.target
